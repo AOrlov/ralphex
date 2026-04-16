@@ -506,6 +506,13 @@ func (r *Runner) runTaskPhase(ctx context.Context) error {
 			return errors.New("task execution failed after retry (FAILED signal received)")
 		}
 
+		// no signal emitted — if plan is fully checked, treat as completed.
+		// Copilot CLI may exit cleanly without emitting ALL_TASKS_DONE.
+		if result.Signal == "" && !r.lastSessionTimedOut && !r.hasUncompletedTasks() {
+			r.log.PrintRaw("\nall tasks completed, starting code review...\n")
+			return nil
+		}
+
 		retryCount = 0
 		// continue with same prompt - it reads from plan file each time
 		if err := r.sleepWithContext(ctx, r.iterationDelay); err != nil {

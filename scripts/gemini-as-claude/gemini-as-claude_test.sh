@@ -9,28 +9,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../test_helpers.sh"
 WRAPPER="$SCRIPT_DIR/gemini-as-claude.sh"
 TMPDIR_TEST=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
-
-passed=0
-failed=0
-total=0
-
-pass() {
-    passed=$((passed + 1))
-    total=$((total + 1))
-    echo "  PASS: $1"
-}
-
-fail() {
-    failed=$((failed + 1))
-    total=$((total + 1))
-    echo "  FAIL: $1"
-    if [[ -n "${2:-}" ]]; then
-        echo "        $2"
-    fi
-}
 
 # create a mock gemini script that emits predefined lines
 create_mock_gemini() {
@@ -589,12 +571,4 @@ else
     fail "wrapper failed with stdin prompt" "got: $output"
 fi
 
-# ---------------------------------------------------------------------------
-# summary
-# ---------------------------------------------------------------------------
-echo ""
-echo "results: $passed passed, $failed failed, $total total"
-
-if [[ $failed -gt 0 ]]; then
-    exit 1
-fi
+print_summary

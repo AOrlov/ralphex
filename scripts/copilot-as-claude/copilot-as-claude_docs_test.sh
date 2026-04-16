@@ -4,49 +4,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../test_helpers.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-
-passed=0
-failed=0
-total=0
-
-pass() {
-    passed=$((passed + 1))
-    total=$((total + 1))
-    echo "  PASS: $1"
-}
-
-fail() {
-    failed=$((failed + 1))
-    total=$((total + 1))
-    echo "  FAIL: $1"
-    if [[ -n "${2:-}" ]]; then
-        echo "        $2"
-    fi
-}
-
-assert_contains() {
-    local file="$1"
-    local needle="$2"
-    local label="$3"
-
-    if grep -Fq -- "$needle" "$file"; then
-        pass "$label"
-    else
-        fail "$label" "missing '$needle' in $file"
-    fi
-}
-
-assert_executable() {
-    local file="$1"
-    local label="$2"
-
-    if [[ -x "$file" ]]; then
-        pass "$label"
-    else
-        fail "$label" "$file is not executable"
-    fi
-}
 
 echo "running copilot-as-claude docs tests"
 echo ""
@@ -165,9 +124,4 @@ assert_contains \
     "GitHub Copilot CLI wrapper for Claude-compatible output" \
     "CLAUDE inventory uses final Copilot wrapper naming"
 
-echo ""
-echo "summary: $passed passed, $failed failed, $total total"
-
-if [[ $failed -ne 0 ]]; then
-    exit 1
-fi
+print_summary

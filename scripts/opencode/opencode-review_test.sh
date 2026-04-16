@@ -10,28 +10,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../test_helpers.sh"
 SCRIPT="$SCRIPT_DIR/opencode-review.sh"
 TMPDIR_BASE=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
-
-passed=0
-failed=0
-total=0
-
-pass() {
-    passed=$((passed + 1))
-    total=$((total + 1))
-    echo "  PASS: $1"
-}
-
-fail() {
-    failed=$((failed + 1))
-    total=$((total + 1))
-    echo "  FAIL: $1"
-    if [[ -n "${2:-}" ]]; then
-        echo "        $2"
-    fi
-}
 
 # create a fake opencode that dumps its args and OPENCODE_CONFIG_CONTENT
 stub_dir="$TMPDIR_BASE/bin"
@@ -227,12 +209,4 @@ else
     fail "prompt content not found in args" "got: $args"
 fi
 
-# ---------------------------------------------------------------------------
-# summary
-# ---------------------------------------------------------------------------
-echo ""
-echo "results: $passed passed, $failed failed, $total total"
-
-if [[ $failed -gt 0 ]]; then
-    exit 1
-fi
+print_summary

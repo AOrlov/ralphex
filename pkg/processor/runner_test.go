@@ -3812,3 +3812,109 @@ func TestRunner_IdleTimeout_ReviewLoopExitsWhenSignalPresent(t *testing.T) {
 	}
 	assert.False(t, foundIdleMsg, "should NOT log idle timeout when signal is present")
 }
+
+func TestRunner_TaskPhase_NoSignalPlanComplete(t *testing.T) {
+	// when executor returns no signal and plan has all [x], inference should treat it as completed
+	tmpDir := t.TempDir()
+	planFile := filepath.Join(tmpDir, "plan.md")
+	require.NoError(t, os.WriteFile(planFile, []byte("# Plan\n### Task 1:\n- [x] done item"), 0o600))
+
+	log := newMockLogger("progress.txt")
+	claude := newMockExecutor([]executor.Result{
+		{Output: "finished work", Signal: ""}, // no signal, but plan is complete
+	})
+	codex := newMockExecutor(nil)
+
+	cfg := processor.Config{
+		Mode: processor.ModeTasksOnly, PlanFile: planFile, MaxIterations: 10,
+		IterationDelayMs: 1, AppConfig: testAppConfig(t),
+	}
+	r := processor.NewWithExecutors(cfg, log, processor.Executors{Claude: claude, Codex: codex}, &status.PhaseHolder{})
+	err := r.Run(t.Context())
+
+	require.NoError(t, err, "should complete successfully via no-signal inference")
+	assert.Len(t, claude.RunCalls(), 1, "should call claude only once")
+
+	// verify the "all tasks completed" message was logged
+	var foundComplete bool
+	for _, call := range log.PrintRawCalls() {
+		if strings.Contains(call.Format, "all tasks completed") {
+			foundComplete = true
+			break
+		}
+	}
+	assert.True(t, foundComplete, "should log completion message")
+}
+
+func TestRunner_TaskPhase_NoSignalPlanIncomplete(t *testing.T) {
+	// when executor returns no signal but plan has [ ] items, loop should continue
+	tmpDir := t.TempDir()
+	planFile := filepath.Join(tmpDir, "plan.md")
+	require.NoError(t, os.WriteFile(planFile, []byte("# Plan\n### Task 1:\n- [ ] pending item"), 0o600))
+
+	log := newMockLogger("progress.txt")
+	claude := newMockExecutor([]executor.Result{
+		{Output: "partial work", Signal: ""},  // no signal, plan incomplete → continue
+		{Output: "more work", Signal: ""},      // no signal, plan still incomplete → continue
+	})
+	codex := newMockExecutor(nil)
+
+	cfg := processor.Config{
+		Mode: processor.ModeTasksOnly, PlanFile: planFile, MaxIterations: 2,
+		IterationDelayMs: 1, AppConfig: testAppConfig(t),
+	}
+	r := processor.NewWithExecutors(cfg, log, processor.Executors{Claude: claude, Codex: codex}, &status.PhaseHolder{})
+	err := r.Run(t.Context())
+
+	require.Error(t, err, "should hit max iterations because inference does not fire")
+	assert.Contains(t, err.Error(), "max iterations")
+	assert.Len(t, claude.RunCalls(), 2, "should call claude twice before hitting max iterations")
+}
+
+func TestRunner_TaskPhase_NoSignalPlanCompleteButTimedOut(t *testing.T) {
+	// when session timed out, inference should NOT fire even if plan is complete.
+	// lastSessionTimedOut guard prevents false completion from killed sessions.
+	tmpDir := t.TempDir()
+	planFile := filepath.Join(tmpDir, "plan.md")
+	require.NoError(t, os.WriteFile(planFile, []byte("# Plan\n### Task 1:\n- [x] done item"), 0o600))
+
+	log := newMockLogger("progress.txt")
+	appCfg := testAppConfig(t)
+	appCfg.SessionTimeout = 10 * time.Millisecond
+	appCfg.SessionTimeoutSet = true
+
+	callCount := 0
+	// first call: block until session timeout fires → lastSessionTimedOut = true
+	// second call: return completion signal normally
+	claude := &mocks.ExecutorMock{
+		RunFunc: func(ctx context.Context, _ string) executor.Result {
+			callCount++
+			if callCount == 1 {
+				<-ctx.Done() // block until session timeout
+				return executor.Result{Error: ctx.Err()}
+			}
+			return executor.Result{Output: "done", Signal: status.Completed}
+		},
+	}
+	codex := newMockExecutor(nil)
+
+	cfg := processor.Config{
+		Mode: processor.ModeTasksOnly, PlanFile: planFile, MaxIterations: 10,
+		IterationDelayMs: 1, AppConfig: appCfg,
+	}
+	r := processor.NewWithExecutors(cfg, log, processor.Executors{Claude: claude, Codex: codex}, &status.PhaseHolder{})
+	err := r.Run(t.Context())
+
+	require.NoError(t, err, "should complete on second iteration via explicit signal")
+	assert.Len(t, claude.RunCalls(), 2, "should call claude twice: timed-out + completed")
+
+	// verify session timeout was logged (proves lastSessionTimedOut was set)
+	var foundTimeout bool
+	for _, call := range log.PrintCalls() {
+		if strings.Contains(call.Format, "session timed out") {
+			foundTimeout = true
+			break
+		}
+	}
+	assert.True(t, foundTimeout, "should log session timeout warning on first iteration")
+}

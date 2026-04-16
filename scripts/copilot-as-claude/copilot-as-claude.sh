@@ -104,31 +104,21 @@ if [[ "$prompt" == *"<<<RALPHEX:QUESTION>>>"* && \
     is_plan_prompt=1
 fi
 
-is_task_prompt=0
-if [[ "$prompt" == *"<<<RALPHEX:ALL_TASKS_DONE>>>"* ]]; then
-    is_task_prompt=1
-fi
-
 plan_progress_file=""
 if [[ "$is_plan_prompt" == "1" ]]; then
     plan_progress_file=$(progress_file_from_prompt 2>/dev/null || true)
-fi
-
-task_plan_file=""
-if [[ "$is_task_prompt" == "1" ]]; then
-    task_plan_file=$(printf '%s\n' "$prompt" | grep -o 'Read the plan file at [^[:space:]]*' | head -1 | sed 's/^Read the plan file at //; s/\.$//' || true)
 fi
 
 # copilot defaults to markdown output (## headers, **bold**, ```fences```) which
 # renders as literal characters in ralphex progress logs.  the formatting rule
 # suppresses this; without it every review run has noisy markup in the log.
 if [[ "$is_review_prompt" == "1" ]]; then
-    adapter_text=$'FORMATTING RULE (strict): All output must be plain text only — no markdown of any kind (no headers, bold, code spans, code fences, horizontal rules). Use plain indented lists for structure. This renders in a terminal; markdown appears as literal characters.\n\nRalphex review adapter for GitHub Copilot CLI:\n- Review prompts refer to Claude "Task tool" calls — interpret those as agent delegation instructions.\n- Delegate all requested review roles as separate sub-agents; if parallel delegation is unavailable, run them sequentially — drop none.\n- Each agent should inspect the diff and source files directly and report problems only.\n- After all reviews, verify findings, fix confirmed issues, rerun tests and lint, and preserve all <<<RALPHEX:...>>> signals verbatim.'
+    adapter_text=$'FORMATTING RULE (strict): All output must be plain text only — no markdown of any kind (no headers, bold, code spans, code fences, horizontal rules). Use plain indented lists for structure.\n\nRalphex review adapter for GitHub Copilot CLI:\n- Review prompts refer to Claude "Task tool" calls — interpret those as agent delegation instructions.\n- Delegate all requested review roles as separate sub-agents; if parallel delegation is unavailable, run them sequentially — drop none.\n- Each agent should inspect the diff and source files directly and report problems only.\n- After all reviews, verify findings, fix confirmed issues, rerun tests and lint, and preserve all <<<RALPHEX:...>>> signals verbatim.'
     prompt="$adapter_text"$'\n\n'"$prompt"
 fi
 
 if [[ "$is_plan_prompt" == "1" ]]; then
-    plan_adapter_text=$'FORMATTING RULE (strict): Your analysis and thinking text — everything you write before emitting <<<RALPHEX:QUESTION>>> or <<<RALPHEX:PLAN_DRAFT>>> — must be plain text only. No backticks around code names or identifiers, no # or ## headers, no **bold** or *italic*, no markdown of any kind. Refer to code names as plain words (e.g. myFunction() not `myFunction()`). The plan document body inside <<<RALPHEX:PLAN_DRAFT>>>...<<<RALPHEX:END>>> must use the plan file markdown format exactly as specified in the prompt. Preserve all <<<RALPHEX:...>>> signals verbatim.\n\nQUESTION RULE (strict): Do NOT use Copilot\'s native ask_user tool or any other interactive question mechanism. When clarification is needed, emit the <<<RALPHEX:QUESTION>>> block exactly and stop. If any implementation-blocking uncertainty remains, emit QUESTION instead of PLAN_DRAFT. Do not carry unresolved blockers into an "Open Questions" or "Assumptions" section of the draft.\n\nPLAN REVIEW RULE (overrides other instructions): Present a <<<RALPHEX:PLAN_DRAFT>>>...<<<RALPHEX:END>>> block for user review before any new plan is accepted. Once the progress file shows DRAFT REVIEW: accept for the current draft, do NOT emit another PLAN_DRAFT unless the user later requested revisions. Instead, write the accepted plan file and emit PLAN_READY. If you find an existing plan file matching the request, do NOT modify it. Output the exact plan path on the line immediately before PLAN_READY and stop. Only emit PLAN_READY after writing the accepted new plan file on disk following user acceptance.'
+    plan_adapter_text=$'FORMATTING RULE (strict): Analysis and thinking text must be plain text only — no backticks, no markdown headers, bold, or italic. The plan body inside <<<RALPHEX:PLAN_DRAFT>>>...<<<RALPHEX:END>>> uses markdown as specified in the prompt. Preserve all <<<RALPHEX:...>>> signals verbatim.\n\nSIGNAL RULES (strict, override other instructions): Do NOT use Copilot\'s native ask_user tool. When clarification is needed, emit a <<<RALPHEX:QUESTION>>>...<<<RALPHEX:END>>> block and stop — do not proceed to PLAN_DRAFT with unresolved questions. Present <<<RALPHEX:PLAN_DRAFT>>>...<<<RALPHEX:END>>> for user review before writing any plan file. After the progress file shows DRAFT REVIEW: accept, write the accepted plan and emit PLAN_READY — do NOT emit another PLAN_READY unless revisions were requested.'
     prompt="$plan_adapter_text"$'\n\n'"$prompt"
 fi
 
@@ -156,20 +146,20 @@ stdout_pipe="$tmp_dir/stdout.fifo"
 plan_write_marker="$tmp_dir/plan-write.marker"
 mkfifo "$stdout_pipe"
 printf '%s' "$prompt" > "$prompt_file"
-touch "$plan_write_marker"
+if [[ "$is_plan_prompt" == "1" ]]; then
+    touch "$plan_write_marker"
+fi
+
+# clear stray characters copilot may write to /dev/tty (spinner/tab).
+# subshell suppresses errors when no controlling terminal is available.
+clear_tty() {
+    (printf '\r\033[K' >/dev/tty) 2>/dev/null || true
+}
 
 cleanup() {
     rm -f "$stderr_file" "$prompt_file" "$stdout_pipe" "$plan_write_marker"
     rm -rf "$tmp_dir"
-    # copilot may write tab characters or other control sequences to /dev/tty
-    # (e.g. session status indicators in --silent mode).  reset the cursor to
-    # column 0 and clear to end-of-line so those stray chars don't appear after
-    # the next prompt ralphex prints (e.g. "Continue with plan implementation?")
-    # use a subshell so that a failed >/dev/tty open (no controlling terminal)
-    # is fully suppressed — bash prints the error to the shell's own stderr
-    # before 2>/dev/null takes effect on the command, but the subshell's fd 2
-    # is redirected before any inner redirections are attempted.
-    (printf '\r\033[K' >/dev/tty) 2>/dev/null || true
+    clear_tty
 }
 trap cleanup EXIT
 
@@ -188,16 +178,12 @@ copilot_pid=$!
 
 emit_text_delta() {
     local text="$1"
-    if [[ "$text" == *"<<<RALPHEX:ALL_TASKS_DONE>>>"* || "$text" == *"<<<RALPHEX:TASK_FAILED>>>"* ]]; then
-        task_signal_emitted=1
-    fi
-    # before the first output, clear any stray characters copilot may have
-    # written directly to /dev/tty (spinner/progress indicator tab).  this must
-    # happen before ralphex's progress logger prints the first timestamped line,
-    # otherwise the stray char appears prepended to the timestamp.
+
+    # clear stray /dev/tty characters before the first output so they don't
+    # appear prepended to ralphex's first timestamped progress line.
     if [[ "$first_output_emitted" == "0" ]]; then
         first_output_emitted=1
-        (printf '\r\033[K' >/dev/tty) 2>/dev/null || true
+        clear_tty
     fi
     jq -cn --arg text "$text" \
         '{type: "content_block_delta", delta: {type: "text_delta", text: $text}}'
@@ -205,6 +191,43 @@ emit_text_delta() {
 
 emit_keepalive() {
     printf '%s\n' '{"type":"content_block_delta","delta":{"type":"text_delta","text":""}}'
+}
+
+# terminate the copilot process and mark the stop as intentional.
+# callers should `break` out of the event loop after calling this.
+stop_copilot() {
+    intentional_stop=1
+    [[ -n "$copilot_pid" ]] && kill -TERM "$copilot_pid" 2>/dev/null || true
+}
+
+# handle a native ask_user event during plan creation.
+# translates into a RALPHEX:QUESTION signal or reports an error.
+# returns 0 on handled (caller should break), 1 on not detected.
+handle_native_question() {
+    local json_line="$1"
+    local prefix_text="${2:-}"
+    local rc=0
+
+    extract_native_plan_question "$json_line" && rc=0 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        if [[ -n "$prefix_text" ]]; then
+            emit_text_delta "$prefix_text"$'\n'"$native_plan_question_text"
+        else
+            emit_text_delta "$native_plan_question_text"
+        fi
+        stop_copilot
+        return 0
+    fi
+
+    if [[ $rc -eq 2 ]]; then
+        emit_text_delta "$native_plan_question_error"$'\n'
+        forced_exit_code=1
+        stop_copilot
+        return 0
+    fi
+
+    return 1
 }
 
 extract_plan_block_for_marker() {
@@ -388,6 +411,8 @@ plan_written_since_start() {
     return 1
 }
 
+# translate Copilot's native ask_user JSONL event into a RALPHEX:QUESTION signal.
+# tested against Copilot CLI ~1.x JSONL schema (toolRequests[].args.question/choices).
 native_plan_question_text=""
 native_plan_question_error=""
 extract_native_plan_question() {
@@ -544,75 +569,9 @@ accepted_draft_ready_fallback_path() {
     plan_written_since_start "$plan_progress_file" "$draft_text"
 }
 
-task_complete_fallback() {
-    # Copilot sometimes reads a fully-checked plan, narrates "nothing left to do",
-    # and exits cleanly without emitting ALL_TASKS_DONE. When the plan file has
-    # no remaining unchecked actionable task checkboxes, synthesize the signal.
-    [[ "$is_task_prompt" == "1" ]] || return 1
-    [[ "$intentional_stop" == "0" ]] || return 1
-    [[ "$copilot_exit" == "0" ]] || return 1
-    [[ "${task_signal_emitted:-0}" == "0" ]] || return 1
-    [[ -n "$task_plan_file" && -f "$task_plan_file" ]] || return 1
-
-    # check for unchecked actionable checkboxes inside Task/Iteration sections.
-    # mirrors Go's hasUncompletedTasks() logic:
-    #   - only look at lines inside "### Task N:" or "### Iteration N:" sections
-    #   - skip checkboxes whose text contains [ ] or [x] (format descriptions)
-    local in_task=0
-    local has_tasks=0
-    local saw_title=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$line" =~ ^#[[:space:]] && "$saw_title" == "0" ]]; then
-            saw_title=1
-            continue
-        fi
-        # detect task section headers
-        if [[ "$line" =~ ^###[[:space:]]+(Task|Iteration)[[:space:]] ]]; then
-            in_task=1
-            has_tasks=1
-            continue
-        fi
-        # mirror pkg/plan.ParsePlan: only h2 or h1-after-title close the task section.
-        if [[ "$line" =~ ^##[[:space:]] && ! "$line" =~ ^###[[:space:]] ]]; then
-            in_task=0
-            continue
-        fi
-        if [[ "$saw_title" == "1" && "$line" =~ ^#[[:space:]] ]]; then
-            in_task=0
-            continue
-        fi
-        [[ "$in_task" == "1" ]] || continue
-        # match unchecked checkbox: "- [ ] text"
-        if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+\[\ \][[:space:]]*(.*) ]]; then
-            local cb_text="${BASH_REMATCH[1]}"
-            # skip format-description checkboxes (text contains [ ] or [x])
-            if [[ "$cb_text" =~ \[[[:space:]]*[xX\ ]?[[:space:]]*\] ]]; then
-                continue
-            fi
-            return 1  # found actionable unchecked checkbox
-        fi
-    done < "$task_plan_file"
-
-    # fallback for malformed plans with no task headers: check entire file
-    if [[ "$has_tasks" == "0" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+\[\ \][[:space:]]*(.*) ]]; then
-                local cb_text="${BASH_REMATCH[1]}"
-                if [[ "$cb_text" =~ \[[[:space:]]*[xX\ ]?[[:space:]]*\] ]]; then
-                    continue
-                fi
-                return 1
-            fi
-        done < "$task_plan_file"
-    fi
-
-    return 0  # no remaining tasks
-}
-
 intentional_stop=0
 first_output_emitted=0
 forced_exit_code=""
-task_signal_emitted=0
 
 while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" ]] && continue
@@ -631,35 +590,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             if [[ -n "$message_text" ]]; then
                 if [[ "$is_plan_prompt" == "1" ]] && extract_first_plan_boundary "$message_text"; then
                     emit_text_delta "$plan_boundary_text"
-                    intentional_stop=1
-                    if [[ -n "$copilot_pid" ]]; then
-                        kill -TERM "$copilot_pid" 2>/dev/null || true
-                    fi
+                    stop_copilot
                     break
                 fi
             fi
             if [[ "$is_plan_prompt" == "1" ]]; then
-                if extract_native_plan_question "$line"; then
-                    if [[ -n "$message_text" ]]; then
-                        emit_text_delta "$message_text"$'\n'"$native_plan_question_text"
-                    else
-                        emit_text_delta "$native_plan_question_text"
-                    fi
-                    intentional_stop=1
-                    if [[ -n "$copilot_pid" ]]; then
-                        kill -TERM "$copilot_pid" 2>/dev/null || true
-                    fi
+                if handle_native_question "$line" "$message_text"; then
                     break
-                else
-                    native_question_status=$?
-                    if [[ $native_question_status -eq 2 ]]; then
-                        emit_text_delta "$native_plan_question_error"$'\n'
-                        forced_exit_code=1
-                        if [[ -n "$copilot_pid" ]]; then
-                            kill -TERM "$copilot_pid" 2>/dev/null || true
-                        fi
-                        break
-                    fi
                 fi
             fi
             if [[ -n "$message_text" ]]; then
@@ -667,25 +604,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             fi
             ;;
         ask_user|assistant.ask_user|session.ask_user|user.question)
-            if [[ "$is_plan_prompt" == "1" ]]; then
-                if extract_native_plan_question "$line"; then
-                    emit_text_delta "$native_plan_question_text"
-                    intentional_stop=1
-                    if [[ -n "$copilot_pid" ]]; then
-                        kill -TERM "$copilot_pid" 2>/dev/null || true
-                    fi
-                    break
-                else
-                    native_question_status=$?
-                    if [[ $native_question_status -eq 2 ]]; then
-                        emit_text_delta "$native_plan_question_error"$'\n'
-                        forced_exit_code=1
-                        if [[ -n "$copilot_pid" ]]; then
-                            kill -TERM "$copilot_pid" 2>/dev/null || true
-                        fi
-                        break
-                    fi
-                fi
+            if [[ "$is_plan_prompt" == "1" ]] && handle_native_question "$line"; then
+                break
             fi
             ;;
         session.error|session.warning|session.info)
@@ -726,10 +646,6 @@ fi
 
 if fallback_path=$(accepted_draft_ready_fallback_path 2>/dev/null); then
     emit_text_delta "$fallback_path"$'\n<<<RALPHEX:PLAN_READY>>>\n'
-fi
-
-if task_complete_fallback 2>/dev/null; then
-    emit_text_delta $'\n<<<RALPHEX:ALL_TASKS_DONE>>>\n'
 fi
 
 if [[ "$term_requested" == "0" ]]; then

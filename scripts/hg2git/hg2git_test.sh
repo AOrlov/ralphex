@@ -27,24 +27,7 @@ if [[ -z "$HG_REPO" ]]; then
     exit 0
 fi
 
-passed=0
-failed=0
-total=0
-
-pass() {
-    passed=$((passed + 1))
-    total=$((total + 1))
-    echo "  PASS: $1"
-}
-
-fail() {
-    failed=$((failed + 1))
-    total=$((total + 1))
-    echo "  FAIL: $1"
-    if [[ -n "${2:-}" ]]; then
-        echo "        $2"
-    fi
-}
+source "$SCRIPT_DIR/../test_helpers.sh"
 
 echo "running hg2git.sh tests against $HG_REPO"
 echo ""
@@ -208,12 +191,4 @@ else
     pass "unsupported command exits non-zero"
 fi
 
-# ---------------------------------------------------------------------------
-# summary
-# ---------------------------------------------------------------------------
-echo ""
-echo "results: $passed passed, $failed failed, $total total"
-
-if [[ $failed -gt 0 ]]; then
-    exit 1
-fi
+print_summary
